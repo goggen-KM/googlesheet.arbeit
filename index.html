@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Supabase Viewer v003</title>
+  <title>Supabase Viewer v005</title>
   <style>
     :root{--bg:#f6f7f9;--card:#fff;--line:#d9dee7;--text:#1f2937;--muted:#6b7280;--accent:#2563eb;--bad:#dc2626;--ok:#15803d;--warn:#b45309;}
     body{margin:0;background:var(--bg);font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--text);}
@@ -24,7 +24,7 @@
 <body>
 <header>
   <h1>Supabase Viewer</h1>
-  <div class="ver">v003 / 月次クラス全員Excel・日別勤務一覧・入管提出用出力</div>
+  <div class="ver">v004 / 対象期間・学生選択対応Excel出力</div>
 </header>
 <main>
   <section class="card">
@@ -54,11 +54,11 @@
     </div>
     <div class="row" style="margin-top:10px">
       <button class="primary" id="loadRecordsBtn" disabled>選択学生の記録を読む</button>
-      <button id="exportStudentXlsxBtn" disabled>学生別Excel出力</button>
-      <button id="exportMonthlyClassBtn" disabled>月次クラス全員Excel出力</button>
-      <button id="exportDailyClassBtn" disabled>クラス別・日別アルバイト別Excel出力</button>
+      <button id="exportMonthlyClassBtn" disabled>勤務記録Excel出力</button>
+      <button id="exportDailyClassBtn" disabled>日別アルバイト別Excel出力</button>
       <button id="exportImmigrationBtn" disabled>入管提出用Excel出力</button>
     </div>
+    <div class="small" style="margin-top:8px">学生を選択している場合は、その学生のみ出力します。学生を選択していない場合は、選択クラス全員分を出力します。対象期間は上の開始日・終了日で指定します。</div>
     <div id="filterStatus" class="status">学生一覧を読み込んでください。</div>
   </section>
 
@@ -79,7 +79,7 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script>
-const VERSION='supabase-viewer-v003';
+const VERSION='supabase-viewer-v004';
 const LS_KEY='supabase-viewer-v003-settings';
 let client=null, students=[], filteredStudents=[], currentRecords=[];
 const $=id=>document.getElementById(id);
@@ -119,7 +119,7 @@ async function loadStudents(){
     students=await fetchPaged(()=>sb.from('students').select('student_no,name,class_name,restore_code,created_at,updated_at').order('class_name',{ascending:true}).order('student_no',{ascending:true}),1000);
     renderClassOptions();applyStudentFilter();
     const ms=Math.round(performance.now()-t0);setStatus('connStatus',`学生一覧を読み込みました：${students.length}名 / ${ms}ms`,'ok');
-    $('classSelect').disabled=false;$('searchInput').disabled=false;$('studentSelect').disabled=false;$('loadRecordsBtn').disabled=false;$('exportStudentXlsxBtn').disabled=false;$('exportMonthlyClassBtn').disabled=false;$('exportDailyClassBtn').disabled=false;$('exportImmigrationBtn').disabled=false;
+    $('classSelect').disabled=false;$('searchInput').disabled=false;$('studentSelect').disabled=false;$('loadRecordsBtn').disabled=false;$('exportMonthlyClassBtn').disabled=false;$('exportDailyClassBtn').disabled=false;$('exportImmigrationBtn').disabled=false;
   }catch(e){setStatus('connStatus','ERROR\n'+(e.message||e),'err');}
 }
 function renderClassOptions(){
@@ -135,7 +135,7 @@ function applyStudentFilter(){
   setStatus('filterStatus',`表示対象：${filteredStudents.length}名${c?' / クラス '+c:''}`);
 }
 function recordsQueryBase(sb){
-  let q=sb.from('work_records').select('student_no,work_date,slot_no,status,job_name,start_time,end_time,break_minutes,work_hours,limit_hours,seven_day_total,note,record_id,created_at,updated_at');
+  let q=sb.from('work_records').select('student_no,work_date,slot_no,status,job_index,job_name,start_time,end_time,break_minutes,work_hours,limit_hours,seven_day_total,note,record_id,created_at,updated_at');
   if($('dateFrom').value)q=q.gte('work_date',$('dateFrom').value);
   if($('dateTo').value)q=q.lte('work_date',$('dateTo').value);
   return q;
@@ -155,9 +155,54 @@ async function fetchRecordsForStudentNos(studentNos){
   }
   return all;
 }
+
+async function fetchJobsForStudentNos(studentNos){
+  const sb=makeClient();let all=[];const chunkSize=120;
+  for(let i=0;i<studentNos.length;i+=chunkSize){
+    const chunk=studentNos.slice(i,i+chunkSize);
+    const rows=await fetchPaged(()=>sb.from('student_jobs').select('student_no,job_index,job_name,job_content,closing_day,close_day,start_date,end_date,is_active').in('student_no',chunk).order('student_no',{ascending:true}).order('job_index',{ascending:true}),1000);
+    all=all.concat(rows);
+  }
+  return all;
+}
+function decorateRecords(records,jobs){
+  const byIndex=new Map(), byName=new Map();
+  (jobs||[]).forEach(j=>{
+    byIndex.set(String(j.student_no)+'|'+String(j.job_index),j);
+    if(j.job_name)byName.set(String(j.student_no)+'|'+String(j.job_name),j);
+  });
+  records.forEach(r=>{
+    let j=null;
+    if(r.job_index!==null&&r.job_index!==undefined)j=byIndex.get(String(r.student_no)+'|'+String(r.job_index));
+    if(!j&&r.job_name)j=byName.get(String(r.student_no)+'|'+String(r.job_name));
+    if(j){
+      if(!r.job_name)r.job_name=j.job_name||'';
+      r.job_content=j.job_content||'';
+      r.closing_day=j.closing_day??j.close_day??'';
+    }else{
+      r.job_content=r.job_content||'';
+      r.closing_day=r.closing_day??'';
+    }
+  });
+  fillSevenDayTotals(records);
+  return records;
+}
+function fillSevenDayTotals(records){
+  const byStu=new Map();
+  for(const r of records){if(!byStu.has(r.student_no))byStu.set(r.student_no,[]);byStu.get(r.student_no).push(r);}
+  for(const rs of byStu.values()){
+    const daily=new Map();
+    for(const r of rs)daily.set(r.work_date,(daily.get(r.work_date)||0)+n(r.work_hours));
+    const dates=[...new Set(rs.map(r=>r.work_date))].sort();
+    const roll=new Map();
+    for(const d of dates){roll.set(d,sumRolling(rs,d,''));}
+    for(const r of rs){if(r.seven_day_total==null||r.seven_day_total==='')r.seven_day_total=roll.get(r.work_date)||0;}
+  }
+}
+
 async function loadRecords(){
   const st=selectedStudent();if(!st){setStatus('filterStatus','学生を選択してください。','err');return;}
-  try{const t0=performance.now();setStatus('filterStatus',`${st.student_no} ${st.name||''} の記録を読み込み中...`);currentRecords=await fetchRecordsForStudent(st.student_no);const ms=Math.round(performance.now()-t0);renderRecords(currentRecords);setStatus('filterStatus',`${st.student_no} ${st.name||''}：${currentRecords.length}件を読み込みました。${ms}ms`,'ok');$('sumMs').textContent=ms+'ms';}
+  try{const t0=performance.now();setStatus('filterStatus',`${st.student_no} ${st.name||''} の記録を読み込み中...`);currentRecords=decorateRecords(await fetchRecordsForStudent(st.student_no),await fetchJobsForStudentNos([st.student_no]));const ms=Math.round(performance.now()-t0);renderRecords(currentRecords);setStatus('filterStatus',`${st.student_no} ${st.name||''}：${currentRecords.length}件を読み込みました。${ms}ms`,'ok');$('sumMs').textContent=ms+'ms';}
   catch(e){setStatus('filterStatus','ERROR\n'+(e.message||e),'err');}
 }
 function renderRecords(rows){
@@ -172,9 +217,9 @@ function rowsToSheet(rows){return XLSX.utils.aoa_to_sheet(rows);}
 function appendSheet(wb, rows, name){const ws=rowsToSheet(rows);ws['!cols']=rows[0].map((_,i)=>({wch:Math.min(40,Math.max(10,...rows.map(r=>String(r[i]??'').length+2)))}));XLSX.utils.book_append_sheet(wb,ws,name.slice(0,31));}
 function downloadWb(wb,fileName){XLSX.writeFile(wb,fileName,{bookType:'xlsx'});}
 function recordRows(records, studentMap){
-  const head=['学籍番号','氏名','クラス','日付','状態','アルバイト名','出勤','退勤','休憩分','労働時間','上限','7日計','メモ'];
+  const head=['学籍番号','氏名','クラス','日付','状態','アルバイト名','アルバイト内容','締め日','出勤','退勤','休憩分','労働時間','上限','7日計','メモ'];
   const rows=[head];
-  for(const r of records){const st=studentMap.get(r.student_no)||{};rows.push([r.student_no,st.name||'',st.class_name||'',r.work_date,r.status||'',r.job_name||'',normalizeTime(r.start_time),normalizeTime(r.end_time),r.break_minutes??'',n(r.work_hours),r.limit_hours==null?'':n(r.limit_hours),r.seven_day_total==null?'':n(r.seven_day_total),r.note||'']);}
+  for(const r of records){const st=studentMap.get(r.student_no)||{};rows.push([r.student_no,st.name||'',st.class_name||'',r.work_date,r.status||'',r.job_name||'',r.job_content||'',r.closing_day??'',normalizeTime(r.start_time),normalizeTime(r.end_time),r.break_minutes??'',n(r.work_hours),r.limit_hours==null?'':n(r.limit_hours),r.seven_day_total==null?'':n(r.seven_day_total),r.note||'']);}
   return rows;
 }
 function groupByStudent(records){const m=new Map();for(const r of records){if(!m.has(r.student_no))m.set(r.student_no,[]);m.get(r.student_no).push(r);}return m;}
@@ -197,12 +242,12 @@ async function exportStudentXlsx(){
   catch(e){setStatus('filterStatus','ERROR\n'+(e.message||e),'err');}
 }
 function requireClassOrConfirm(){
-  const cls=$('classSelect').value;
-  if(!cls && !confirm('全クラスを対象にします。件数が多い場合は時間がかかります。続けますか？'))throw new Error('キャンセルしました。');
+  const cls=$('classSelect').value;const st=selectedStudent();
+  if(!st && !cls && !confirm('全クラスを対象にします。件数が多い場合は時間がかかります。続けますか？'))throw new Error('キャンセルしました。');
   if(!$('dateFrom').value || !$('dateTo').value){if(!confirm('期間が空欄です。対象データが多い場合は時間がかかります。続けますか？'))throw new Error('キャンセルしました。');}
 }
-async function targetStudents(){const c=$('classSelect').value;const list=students.filter(s=>!c||s.class_name===c);if(!list.length)throw new Error('対象学生がいません。');return list;}
-async function fetchTargetRecords(){const list=await targetStudents();return {list,records:await fetchRecordsForStudentNos(list.map(s=>s.student_no))};}
+async function targetStudents(){const st=selectedStudent();if(st)return [st];const c=$('classSelect').value;const list=students.filter(s=>!c||s.class_name===c);if(!list.length)throw new Error('対象学生がいません。');return list;}
+async function fetchTargetRecords(){const list=await targetStudents();const nos=list.map(s=>s.student_no);const records=await fetchRecordsForStudentNos(nos);const jobs=await fetchJobsForStudentNos(nos);return {list,records:decorateRecords(records,jobs),jobs};}
 
 function dateRangeList(from,to){
   if(!from||!to)return [];
@@ -216,13 +261,18 @@ function setMonthPeriod(){
   const [y,mo]=m.split('-').map(Number);$('dateFrom').value=`${y}-${pad(mo)}-01`;$('dateTo').value=ymDate(new Date(y,mo,0));
   setStatus('filterStatus',`対象期間を ${$('dateFrom').value}〜${$('dateTo').value} にしました。`,'ok');
 }
-function ensureMonthPeriod(){
-  if(!$('dateFrom').value||!$('dateTo').value)throw new Error('開始日と終了日を指定してください。月次出力では期間指定が必要です。');
+function ensurePeriod(){
+  if(!$('dateFrom').value||!$('dateTo').value)throw new Error('開始日と終了日を指定してください。出力では期間指定が必要です。');
   if($('dateFrom').value>$('dateTo').value)throw new Error('開始日が終了日より後です。');
+}
+function targetLabel(list){
+  const st=selectedStudent();
+  if(st)return `${safeName(st.student_no)}_${safeName(st.name||'')}`;
+  return safeName($('classSelect').value||'全クラス');
 }
 function judgeRow(r){const h=n(r.work_hours), lim=r.limit_hours==null?null:n(r.limit_hours), sev=r.seven_day_total==null?null:n(r.seven_day_total);if(lim!=null&&sev>lim)return '超過';if(h>0)return '勤務';if(r.status==='なし')return 'なし';return '';}
 function buildMonthlyClassWorkbook(list, records){
-  ensureMonthPeriod();
+  ensurePeriod();
   const wb=XLSX.utils.book_new();
   const smap=new Map(list.map(s=>[s.student_no,s]));
   const byStu=groupByStudent(records);
@@ -237,10 +287,10 @@ function buildMonthlyClassWorkbook(list, records){
   }
   appendSheet(wb,index,'一覧');
 
-  const daily=[['日付','曜日','学籍番号','氏名','クラス','状態','アルバイト名','出勤','退勤','休憩分','労働時間','上限','7日計','判定','メモ']];
+  const daily=[['日付','曜日','学籍番号','氏名','クラス','状態','アルバイト名','アルバイト内容','締め日','出勤','退勤','休憩分','労働時間','上限','7日計','判定','メモ']];
   for(const r of records.slice().sort((a,b)=>String(a.work_date).localeCompare(String(b.work_date))||String(a.student_no).localeCompare(String(b.student_no))||n(a.slot_no)-n(b.slot_no))){
     const st=smap.get(r.student_no)||{};
-    daily.push([r.work_date,weekdayJa(r.work_date),r.student_no,st.name||'',st.class_name||'',r.status||'',r.job_name||'',normalizeTime(r.start_time),normalizeTime(r.end_time),r.break_minutes??'',n(r.work_hours),r.limit_hours==null?'':n(r.limit_hours),r.seven_day_total==null?'':n(r.seven_day_total),judgeRow(r),r.note||'']);
+    daily.push([r.work_date,weekdayJa(r.work_date),r.student_no,st.name||'',st.class_name||'',r.status||'',r.job_name||'',r.job_content||'',r.closing_day??'',normalizeTime(r.start_time),normalizeTime(r.end_time),r.break_minutes??'',n(r.work_hours),r.limit_hours==null?'':n(r.limit_hours),r.seven_day_total==null?'':n(r.seven_day_total),judgeRow(r),r.note||'']);
   }
   appendSheet(wb,daily,'日別勤務一覧');
 
@@ -251,7 +301,7 @@ function buildMonthlyClassWorkbook(list, records){
     for(const r of rs){if(!n(r.work_hours))continue;const ym=monthKey(r.work_date);const job=r.job_name||'';const k=ym+'\t'+job;byMonthJob.set(k,(byMonthJob.get(k)||0)+n(r.work_hours));monthTotal.set(ym,(monthTotal.get(ym)||0)+n(r.work_hours));}
     if(byMonthJob.size===0){immi.push([st.student_no,st.name||'',st.class_name||'','','','',0,0,'','']);continue;}
     for(const [k,v] of [...byMonthJob.entries()].sort()){
-      const [ym,job]=k.split('\t');const mt=monthTotal.get(ym)||0;immi.push([st.student_no,st.name||'',st.class_name||'',ym,job,'',Number(v.toFixed(2)),Number(mt.toFixed(2)),mt>112?'要確認':'','']);
+      const [ym,job]=k.split('\t');const mt=monthTotal.get(ym)||0;{const sample=rs.find(r=>(r.job_name||'')===job)||{};immi.push([st.student_no,st.name||'',st.class_name||'',ym,job,sample.job_content||'',Number(v.toFixed(2)),Number(mt.toFixed(2)),mt>112?'要確認':'','']);}
     }
   }
   appendSheet(wb,immi,'入管提出用一覧');
@@ -259,19 +309,19 @@ function buildMonthlyClassWorkbook(list, records){
   for(const st of list){
     const rs=(byStu.get(st.student_no)||[]).slice().sort((a,b)=>String(a.work_date).localeCompare(String(b.work_date))||n(a.slot_no)-n(b.slot_no));
     const byDate=new Map(); for(const r of rs){if(!byDate.has(r.work_date))byDate.set(r.work_date,[]);byDate.get(r.work_date).push(r);}
-    const rows=[['学籍番号',st.student_no],['氏名',st.name||''],['クラス',st.class_name||''],['対象期間',periodLabel()],[],['日付','曜日','slot','状態','アルバイト名','出勤','退勤','休憩分','労働時間','上限','7日計','判定','メモ']];
+    const rows=[['学籍番号',st.student_no],['氏名',st.name||''],['クラス',st.class_name||''],['対象期間',periodLabel()],[],['日付','曜日','slot','状態','アルバイト名','アルバイト内容','締め日','出勤','退勤','休憩分','労働時間','上限','7日計','判定','メモ']];
     const sourceDates=dates.length?dates:[...byDate.keys()].sort();
     for(const d of sourceDates){
       const dayRows=byDate.get(d)||[];
-      if(dayRows.length===0){rows.push([d,weekdayJa(d),'','未入力','','','','',0,'','','未入力','']);continue;}
-      for(const r of dayRows){rows.push([r.work_date,weekdayJa(r.work_date),r.slot_no??'',r.status||'',r.job_name||'',normalizeTime(r.start_time),normalizeTime(r.end_time),r.break_minutes??'',n(r.work_hours),r.limit_hours==null?'':n(r.limit_hours),r.seven_day_total==null?'':n(r.seven_day_total),judgeRow(r),r.note||'']);}
+      if(dayRows.length===0){rows.push([d,weekdayJa(d),'','未入力','','','','','',0,'','','未入力','']);continue;}
+      for(const r of dayRows){rows.push([r.work_date,weekdayJa(r.work_date),r.slot_no??'',r.status||'',r.job_name||'',r.job_content||'',r.closing_day??'',normalizeTime(r.start_time),normalizeTime(r.end_time),r.break_minutes??'',n(r.work_hours),r.limit_hours==null?'':n(r.limit_hours),r.seven_day_total==null?'':n(r.seven_day_total),judgeRow(r),r.note||'']);}
     }
     appendSheet(wb,rows,`${st.student_no}_${safeName(st.name||'')}`.slice(0,31));
   }
   return wb;
 }
 async function exportMonthlyClass(){
-  try{requireClassOrConfirm();ensureMonthPeriod();const t0=performance.now();setStatus('filterStatus','月次クラス全員Excelを作成中...');const {list,records}=await fetchTargetRecords();const wb=buildMonthlyClassWorkbook(list,records);const file=`月次クラス全員_${safeName($('classSelect').value||'全クラス')}_提出日${todayIso()}_対象期間${periodLabel()}.xlsx`;downloadWb(wb,file);setStatus('filterStatus',`月次クラス全員Excelを出力しました：学生${list.length}名 / 記録${records.length}件 / ${Math.round(performance.now()-t0)}ms`,'ok');}
+  try{requireClassOrConfirm();ensurePeriod();const t0=performance.now();setStatus('filterStatus','勤務記録Excelを作成中...');const {list,records}=await fetchTargetRecords();const wb=buildMonthlyClassWorkbook(list,records);const file=`勤務記録_${targetLabel(list)}_提出日${todayIso()}_対象期間${periodLabel()}.xlsx`;downloadWb(wb,file);setStatus('filterStatus',`勤務記録Excelを出力しました：学生${list.length}名 / 記録${records.length}件 / ${Math.round(performance.now()-t0)}ms`,'ok');}
   catch(e){setStatus('filterStatus','ERROR\n'+(e.message||e),'err');}
 }
 
@@ -291,7 +341,7 @@ function buildDailyWorkbook(list, records){
 function sumOn(rs,date,job){return Number(rs.filter(r=>r.work_date===date&&(r.job_name||'なし')===job).reduce((s,r)=>s+n(r.work_hours),0).toFixed(2))||'';}
 function sumRolling(rs,date,job){const end=new Date(date+'T00:00:00');let sum=0;for(let i=0;i<7;i++){const d=new Date(end);d.setDate(end.getDate()-i);const ds=ymDate(d);for(const r of rs){if(r.work_date===ds && (!job||(r.job_name||'なし')===job))sum+=n(r.work_hours);}}return Number(sum.toFixed(2))||'';}
 async function exportDailyClass(){
-  try{requireClassOrConfirm();const t0=performance.now();setStatus('filterStatus','クラス別・日別アルバイト別Excelを作成中...');const {list,records}=await fetchTargetRecords();const wb=buildDailyWorkbook(list,records);const file=`日別アルバイト別_${safeName($('classSelect').value||'全クラス')}_提出日${todayIso()}_対象期間${periodLabel()}.xlsx`;downloadWb(wb,file);setStatus('filterStatus',`日別アルバイト別Excelを出力しました：学生${list.length}名 / 記録${records.length}件 / ${Math.round(performance.now()-t0)}ms`,'ok');}
+  try{requireClassOrConfirm();const t0=performance.now();setStatus('filterStatus','日別アルバイト別Excelを作成中...');const {list,records}=await fetchTargetRecords();const wb=buildDailyWorkbook(list,records);const file=`日別アルバイト別_${targetLabel(list)}_提出日${todayIso()}_対象期間${periodLabel()}.xlsx`;downloadWb(wb,file);setStatus('filterStatus',`日別アルバイト別Excelを出力しました：学生${list.length}名 / 記録${records.length}件 / ${Math.round(performance.now()-t0)}ms`,'ok');}
   catch(e){setStatus('filterStatus','ERROR\n'+(e.message||e),'err');}
 }
 function buildImmigrationWorkbook(list, records){
@@ -301,21 +351,21 @@ function buildImmigrationWorkbook(list, records){
   for(const st of list){const rs=byStu.get(st.student_no)||[];const rows=[['国籍','学籍番号','氏名','在留カード番号','資格外活動の許可の有無'],['',st.student_no,st.name||'','',''],[],['年月','アルバイト名','アルバイト内容','各アルバイト合計時間','月稼働時間(合計)','時間超過の有無','確認・指導状況']];
     const map=new Map();for(const r of rs){if(!n(r.work_hours))continue;const k=monthKey(r.work_date)+'\t'+(r.job_name||'');map.set(k,(map.get(k)||0)+n(r.work_hours));}
     const monthTotals=new Map();for(const [k,v] of map.entries()){const ym=k.split('\t')[0];monthTotals.set(ym,(monthTotals.get(ym)||0)+v);}
-    for(const [k,v] of [...map.entries()].sort()){const [ym,job]=k.split('\t');const total=monthTotals.get(ym)||0;rows.push([ym,job,'',Number(v.toFixed(2)),Number(total.toFixed(2)),total>28*4?'要確認':'','']);}
-    rows.push([]);rows.push(['締め日別集計']);rows.push(['アルバイト名','締め日','集計期間','合計時間']);rows.push(['※締め日データ未登録のため、月別集計を使用しています。','','','']);
+    for(const [k,v] of [...map.entries()].sort()){const [ym,job]=k.split('\t');const total=monthTotals.get(ym)||0;{const sample=rs.find(r=>(r.job_name||'')===job)||{};rows.push([ym,job,sample.job_content||'',Number(v.toFixed(2)),Number(total.toFixed(2)),total>28*4?'要確認':'','']);}}
+    rows.push([]);rows.push(['締め日別集計']);rows.push(['アルバイト名','締め日','集計期間','合計時間']);const byClose=new Map();for(const r of rs){if(!n(r.work_hours))continue;const cd=r.closing_day||'';const job=r.job_name||'';const k=job+'\t'+cd;byClose.set(k,(byClose.get(k)||0)+n(r.work_hours));}for(const [k,v] of [...byClose.entries()].sort()){const [job,cd]=k.split('\t');rows.push([job,cd,periodLabel(),Number(v.toFixed(2))]);}
     appendSheet(wb,rows,String(st.student_no).slice(0,31));
   }
   return wb;
 }
 async function exportImmigration(){
-  try{requireClassOrConfirm();const t0=performance.now();setStatus('filterStatus','入管提出用Excelを作成中...');const {list,records}=await fetchTargetRecords();const wb=buildImmigrationWorkbook(list,records);const file=`入管提出用_${safeName($('classSelect').value||'全クラス')}_提出日${todayIso()}_対象期間${periodLabel()}.xlsx`;downloadWb(wb,file);setStatus('filterStatus',`入管提出用Excelを出力しました：学生${list.length}名 / 記録${records.length}件 / ${Math.round(performance.now()-t0)}ms`,'ok');}
+  try{requireClassOrConfirm();const t0=performance.now();setStatus('filterStatus','入管提出用Excelを作成中...');const {list,records}=await fetchTargetRecords();const wb=buildImmigrationWorkbook(list,records);const file=`入管提出用_${targetLabel(list)}_提出日${todayIso()}_対象期間${periodLabel()}.xlsx`;downloadWb(wb,file);setStatus('filterStatus',`入管提出用Excelを出力しました：学生${list.length}名 / 記録${records.length}件 / ${Math.round(performance.now()-t0)}ms`,'ok');}
   catch(e){setStatus('filterStatus','ERROR\n'+(e.message||e),'err');}
 }
 
 $('saveBtn').addEventListener('click',saveSettings);
 $('loadStudentsBtn').addEventListener('click',loadStudents);
 $('clearBtn').addEventListener('click',()=>{localStorage.removeItem(LS_KEY);$('url').value='';$('key').value='';setStatus('connStatus','設定を消しました。');});
-$('classSelect').addEventListener('change',applyStudentFilter);$('searchInput').addEventListener('input',applyStudentFilter);$('loadRecordsBtn').addEventListener('click',loadRecords);$('exportStudentXlsxBtn').addEventListener('click',exportStudentXlsx);$('exportMonthlyClassBtn').addEventListener('click',exportMonthlyClass);$('exportDailyClassBtn').addEventListener('click',exportDailyClass);$('exportImmigrationBtn').addEventListener('click',exportImmigration);$('setMonthBtn').addEventListener('click',setMonthPeriod);$('setThisMonthBtn').addEventListener('click',()=>{setThisMonth();$('monthInput').value=$('dateFrom').value.slice(0,7);});$('setAllPeriodBtn').addEventListener('click',setAllPeriod);
+$('classSelect').addEventListener('change',applyStudentFilter);$('searchInput').addEventListener('input',applyStudentFilter);$('loadRecordsBtn').addEventListener('click',loadRecords);$('exportMonthlyClassBtn').addEventListener('click',exportMonthlyClass);$('exportDailyClassBtn').addEventListener('click',exportDailyClass);$('exportImmigrationBtn').addEventListener('click',exportImmigration);$('setMonthBtn').addEventListener('click',setMonthPeriod);$('setThisMonthBtn').addEventListener('click',()=>{setThisMonth();$('monthInput').value=$('dateFrom').value.slice(0,7);});$('setAllPeriodBtn').addEventListener('click',setAllPeriod);
 $('studentSelect').addEventListener('change',()=>{const st=selectedStudent();setStatus('filterStatus',st?`${st.student_no} ${st.name||''} ${st.class_name||''}`:'学生を選択してください。');});
 loadSettings();setThisMonth();$('monthInput').value=$('dateFrom').value.slice(0,7);
 </script>
